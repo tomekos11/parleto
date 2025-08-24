@@ -1,107 +1,82 @@
 <template>
-  <div>
-    <label>xml<input type="radio" value="xml" v-model="view" /></label>
-    <label>table<input type="radio" value="table" v-model="view" /> </label>
-  </div>
+  <ViewSelector v-model="view" />
 
-  <template v-if="view === 'xml'">
-    <h2>XML</h2>
-    <pre> {{ xml }} </pre>
-  </template>
+  <GroupBySelector v-if="view === 'table'" v-model="groupBy" style="margin-bottom: 1rem;" />
 
-  <template v-else>
-    <h2>Grouped table</h2>
-    <table>
-      <thead>
-        <tr class="header">
-          <td v-for="header in headers" :key="header">
-            {{ header }}
-          </td>
-        </tr>
-      </thead>
-      <tbody>
-        <template
-          v-for="([key, value], idx) in Object.entries(groupedData)"
-          :key="idx"
-        >
-          <tr @click="groupToggle(key)" class="group">
-            <td>
-              <div style="display: flex; justify-content: space-between">
-                <span>{{ key }}</span>
-              </div>
-            </td>
-          </tr>
+  <XmlView v-if="view === 'xml'" :xml="xml" />
 
-          <template v-if="!hidden.has(key)">
-            <tr v-for="(row, idx) in value" :key="idx">
-              <td v-for="(cellValue, cellKey) in row" :key="cellKey">
-                {{ cellValue }}
-              </td>
-            </tr>
+  <GroupedTableView
+    v-else
+    :groupedData="groupedData"
+    :headers="headers"
+    :totals="totals"
+    :groupBy="groupBy"
+    v-model:hidden="hidden"
+    @group-toggle="groupToggle"
+  />
 
-            <tr v-if="value.length > 1">
-              <td style="text-align: right">
-                <span v-if="value.length > 1">
-                  total: {{ totalGet(value) }}PLN
-                </span>
-              </td>
-            </tr>
-          </template>
-        </template>
-      </tbody>
-    </table>
-  </template>
-
-  <table>
-    <tr v-for="(item, idx) in data" :key="idx">
-      <td v-for="(_, key) in item" :key="key">
-        <input type="text" v-model="item[key]" />
-      </td>
-    </tr>
-  </table>
+  <EditableTable v-model="data" />
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+import { computed, defineAsyncComponent, onUpdated, reactive, ref, watch } from "vue";
 import { dataGroup, toXml, useExampleData } from "./utils";
+import type { Data } from "./types";
+
+const EditableTable = defineAsyncComponent(() => import("./components/EditableTable.vue"));
+const ViewSelector = defineAsyncComponent(() => import("./components/ViewSelector.vue"));
+const GroupBySelector = defineAsyncComponent(() => import("./components/GroupBySelector.vue"));
+const XmlView = defineAsyncComponent(() => import("./components/XmlView.vue"));
+const GroupedTableView = defineAsyncComponent(() => import("./components/GroupedTableView.vue"));
 
 const view = ref<"xml" | "table">("table");
-
-type Data = {
-  category: string;
-  amount: string;
-  currency: string;
-  [key: string]: string;
-};
 
 const data = useExampleData<Data>();
 
 // TODO: TASK → avoid recomputing while user is still typing
 const xml = computed(() => toXml(data.value ?? []));
 
+const groupBy = ref<keyof Data>("category");
+
 // TODO: TASK → let the user also group by currency and account
-const groupedData = computed(() =>
-  data.value //
-    ? dataGroup(data.value, "category")
-    : [],
-);
+const groupedData = computed<Record<string, Data[]>>(() => {
+  if (!data.value) return {};
+  return dataGroup(data.value, groupBy.value) as Record<string, Data[]>;
+});
+
 const headers = computed(() =>
-  Object.keys(data.value?.[0] ?? {}).filter((i) => i !== "category"),
+  Object.keys(data.value?.[0] ?? {}).filter((i) => i !== groupBy.value),
 );
 
 const hidden = reactive(new Set<string>());
+
 function groupToggle(groupKey: string) {
   hidden.has(groupKey) //
     ? hidden.delete(groupKey)
     : hidden.add(groupKey);
 }
 
+const currencyRatesCache: Record<string, number> = {};
+
 // TODO: TASK → handle different currencies. Use `plnToCurrency` function to get the rates
-function totalGet(items: { amount: string | number; currency: string }[]) {
-  return items.reduce((acc, curr) => acc + Number(curr.amount), 0);
+async function totalGet(items: { amount: string | number; currency: string }[], groupKey?: string | number) {
+   let totalPln = 0;
+
+  for (const item of items) {
+    const cur = (item.currency ?? groupKey).toLowerCase();
+
+    if (!(cur in currencyRatesCache)) {
+      currencyRatesCache[cur] = await plnToCurrency(cur);
+    }
+
+    const rate = currencyRatesCache[cur];
+
+    totalPln += Number(item.amount) / rate;
+  }
+
+  return totalPln.toFixed(2);
 }
 
-// @ts-ignore
 async function plnToCurrency(curr: string) {
   if (curr === "pln") return 1;
 
@@ -111,6 +86,24 @@ async function plnToCurrency(curr: string) {
   const text = await res.text();
   return Number(text.trim());
 }
+
+const totals = ref<Record<string, string>>({});
+
+watch(
+  groupedData,
+  async (groups) => {
+    const newTotals: Record<string, string> = {};
+    for (const [key, items] of Object.entries(groups)) {
+      newTotals[key] = await totalGet(items, key);
+    }
+    totals.value = newTotals;
+  },
+  { immediate: true, deep: true }
+);
+
+onUpdated(() => {
+  console.log('updated')
+})
 </script>
 
 <style scoped>
